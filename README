@@ -1,0 +1,953 @@
+
+I will explain the design and implementation choices i made in this project.
+with an emphasis on Object Oriented Programming principles, separation of concerns,
+deterministic randomness, and gameplay driven decisions.
+
+One of the biggest motivations i had while building the project because of its size
+and hardships i wanted to make as intuitive and maintainable as possible in terms of 
+extensions changes and debuggs so i wont be lost in my own code while finding and fixing
+problems.
+To make everything connects easily from scratch i looked 
+in point of view of blocks, so everything
+is alligned to blocks size, velocity of the avatar: both jumping and horizontal movement.
+placement of trees and terrain,top trees,fruits leaves and more.
+this way of thiking made everything easier and simetriclly, so building the world and the
+game was much more intuitive, and easier.
+
+The main goals of my implementation were:
+- Clear responsibility boundaries between classes.
+- Preserving encapsulation and minimizing coupling.
+- Using the game engine correctly (layers, tags, collision normals, scheduled tasks).
+- Interpreting the instructions in a way that improves gameplay clarity, stability,
+  and overall playability, even when i found it required additional constraints or logic.
+
+================================================
+1. Avatar implementation
+================================================
+
+1.1 General design approach
+---------------------------
+
+I chose to implement the Avatar such that all movement logic, animation logic,
+and energy logic are contained within the Avatar class itself, and are supported
+by helper concepts such as enums, constants, and small helper methods.
+
+The Avatar is the central gameplay entity that represents the player, and therefore
+it is the natural place to concentrate all logic that decides:
+- how the character moves,
+- when actions are legal,
+- how animations are selected,
+- and how energy is consumed or regenerated.
+
+This avoids scattering player behavior across multiple classes and keeps a single,
+coherent authority over the avatar state.
+
+------------------------------------------------
+1.2 Classes, packages, and relationships
+------------------------------------------------
+
+pepse.world.avatar.Avatar
+
+Avatar extends GameObject and is responsible for:
+- Reading user input.
+- Translating raw key presses into logical movement requests.
+- Managing movement state (idle / running / jumping).
+- Managing animation state.
+- Managing the energy resource.
+- Applying physics based movement : velocity updates.
+- Handling collisions relevant to the avatar.
+
+Avatar depends on:
+- UserInputListener for input.
+- AnimationRenderable / Renderable for visual representation.
+- WorldTags for identifying collision targets by tag rather than by type.
+
+Avatar deliberately does not depend on any display class.
+
+pepse.display.AvatarEnergyPercentDisplay
+
+This class is responsible only for displaying the avatar’s energy percentage.
+It does not compute energy, does not decide when energy changes, and does not
+contain gameplay logic.
+
+Its only responsibility is to reflect a numeric value visually.
+
+pepse.PepseGameManager
+
+The game manager acts as a mediator:
+- It creates the Avatar.
+- It creates the energy display.
+- It connects them using a callback mechanism.
+
+This design ensures that the Avatar and the display do not know about each other,
+preserving encapsulation and keeping coupling low.
+
+------------------------------------------------
+1.3 Avatar state changes and movement logic
+------------------------------------------------
+
+I explicitly modeled avatar behavior using logical states rather than relying only
+on raw velocities.
+
+The Avatar internally reasons about:
+- Whether it is on the ground or in the air.
+- Whether it is rising or falling : for the second jump only allowed while falling.
+- What the current movement request is : left, right, none, jump.
+- What the resulting movement state should be (idle / run / jump).
+
+These decisions are expressed explicitly using enums such as:
+- AvatarPosition (ON_THE_GROUND / IN_THE_AIR)
+- AvatarAirSituation (RISING / FALLING)
+- MovementRequest (high-level intent derived from input)
+- MovementState (used for animation and energy logic)
+
+This separation allows:
+- Clear legality checks (for example, jump rules differ when rising vs falling).
+- Precise control over energy costs per situation, jumping is one time update,
+ but idling in the ground
+- is per update similiar to running which also is per update.
+- Cleaner animation switching logic.
+- Easier debugging and reasoning about behavior.
+
+The avatar figuers out its position either its on the ground/trunk in the help
+of a set of gameobjects called floor objects that in collision from above 
+in case it collieded trunks/terrain then it adds the objects to the set.
+in the exit of coliision it removes the object from the set so in that way
+the avatar knows either its on ground/trunk or in the air if the set is empty or not.
+------------------------------------------------
+1.4 Energy logic inside the Avatar
+------------------------------------------------
+
+Energy is an internal resource owned entirely by the Avatar.
+
+Design principles:
+- Only the Avatar can modify its energy.
+- Energy changes only through well defined actions : jumping, running, idiling, eating a fruit.
+- Energy is always clamped to a legal range from 0 to 100
+
+This guarantees:
+- A single source of truth for energy.
+- No duplicated or conflicting logic in other classes.
+
+------------------------------------------------
+1.4.1 Additional threshold for starting a run , preventing flickering logic:
+------------------------------------------------
+
+During testing, especially with high FPS values, i encountered rapid oscillations
+between very small energy values 0 -> 1 -> 2 -> 0 and then really quick to 2
+again, so we get the flicker situation which looks bad and uninviting for a potential
+player.
+
+This caused visible flickering:
+- The avatar would briefly start running,
+- immediately stop,
+- then start again,
+leading to unstable movement and animation flicker.
+
+To solve this, i introduced an additional rule:
+- Starting a run requires at least 10 energy.
+- Continuing a run only requires enough energy to pay the running cost.
+In the way the range of 2 to 10 is like a mediator that fixed the problem.
+
+
+This creates a distinction between:
+- “Can I start running?”
+- “Can I keep running?”
+
+This design choice was made following a question that was asked in the course Q&A forum,
+where it was clarified that introducing such a threshold is one of the valid solutions
+and should be documented in the README.
+
+Tradeoff:
+- Slightly less responsiveness at very low energy levels.
+Benefit:
+- Much smoother movement and stable animations.
+
+------------------------------------------------
+1.5 Energy display design – Observer pattern
+------------------------------------------------
+
+The energy display was designed according to the Observer design pattern.
+
+Roles:
+- Subject: Avatar (owns the energy state).
+- Observer: AvatarEnergyPercentDisplay (shows energy).
+- Mediator: PepseGameManager (connects them).
+
+How it works:
+- Avatar exposes a callback setter for energy changes.
+- PepseGameManager registers the display’s update method as the callback.
+- When the Avatar’s energy changes, it notifies via the callback.
+
+Important details:
+- Avatar notifies only when its energy actually changes.
+- The display updates only when the received value differs from the previous one.
+- The display starts with an initial value of -1, which is outside the legal energy range,
+  ensuring an immediate update at game start.
+
+Why this design:
+- Avatar and display do not know about each other directly.
+- Encapsulation is preserved: no internal fields are exposed.
+- Coupling is minimal and responsibilities are clearly separated.
+
+------------------------------------------------
+1.6 Jump height and running distance constants design using block units and physics:
+------------------------------------------------
+
+The avatar known world is in terms of blocks size.
+so to make it intuitive i wanted to do it easily to change game constants,
+so the avatar velocity x is defined in terms of size blocks, which means how
+many block it can run in an horizontel move.
+so i made the horzintel x velocity movement be depend on the asked number of block to move
+multiplied in the size of a single block.
+
+I did the same with jump, because:
+height is defined in terms of the game worlds basic unit: blocks.
+The desired jump height is specified as a number of blocks, and the initial jump
+velocity is computed using a standard physics equation for motion under constant
+acceleration:
+v = sqrt(2 * g * h)
+This equation was used with the help of online references.
+
+Benefits:
+- Both jump height and running distance can be adjusted by changing
+ a single intuitive parameter.
+- Jump behavior stays consistent with world scale.
+- Tree heights can be balanced against avatar capabilities to create a challenging
+  but playable experience.
+
+------------------------------------------------
+1.7 Correct landing detection using collision normals
+------------------------------------------------
+
+After adding tree trunks, i encountered an issue where the avatar could touch
+a trunk from the side during a jump and be incorrectly considered “on the ground”.
+
+To fix this, i used collision normals provided by the engine.
+A collision is considered a landing only if the collision normal indicates
+contact from above.
+
+A threshold value of -0.8 for the Y component of the normal was selected
+through trial and error and proved reliable in distinguishing real landings
+from side friction.
+------------------------------------------------
+1.8 Animation design and state-driven animation logic
+------------------------------------------------
+The avatar animation system is designed to be driven by explicit logical states,
+and kept consistent with the same concepts the Avatar already uses for movement
+and energy decisions.
+
+The animation is not chosen directly from a single raw value.
+Instead, the Avatar:
+- Reads input and translates it into MovementRequest values.
+- Determines whether it is on the ground or in the air (AvatarPosition).
+- Uses the resolved situation together with the movement request to compute
+  a MovementState (IDLE / RUN / JUMP).
+- Displays the animation that corresponds to the resolved MovementState.
+
+The main enums that drive the behavior are:
+- AvatarPosition (ON_THE_GROUND / IN_THE_AIR)
+- AvatarAirSituation (RISING / FALLING)
+- MovementRequest (high-level intent derived from input)
+- MovementState (IDLE / RUN / JUMP)
+
+------------------------------------------------
+1.8.1 How MovementState maps to animations
+------------------------------------------------
+
+The Avatar maintains three AnimationRenderable objects:
+- idleAnimation
+- runAnimation
+- jumpAnimation
+
+Each frame, after movement and energy logic are resolved, the Avatar:
+1. Updates the relevant AnimationRenderable (run/jump/idle) using update(deltaTime).
+2. Calls updateAvatarAnimationByState(movementState), which:
+   - Switches the renderer’s Renderable only when the MovementState changes.
+   - Always applies horizontal flipping based on the current facing direction.
+
+This ensures that animation switching is stable:
+- If the state did not change, we do not replace the Renderable again.
+- We still update facing direction every frame using setIsFlippedHorizontally().
+
+------------------------------------------------
+1.8.2 Using both states and physics signals (velocity) consistently
+------------------------------------------------
+
+While the design is state-based, the code also uses simple physics signals
+(velocity and collision tracking) as part of determining the correct state.
+
+Examples:
+- Ground vs air detection uses a tracked set of floor objects (floorObjects),
+  and also treats velocity.y == 0 as on-ground.
+- Rising vs falling is determined using velocity.y.
+- On the ground, “actually moving” is verified using velocity.x != 0.
+
+This combination keeps the logic robust:
+- Input expresses intention (MovementRequest).
+- Velocity/collisions confirm the physical reality of motion and contact.
+
+------------------------------------------------
+1.8.3 Air behavior: RUN vs JUMP animations
+------------------------------------------------
+
+In this implementation, being in the air does not automatically imply the JUMP animation.
+
+When AvatarPosition == IN_THE_AIR:
+- If the player is requesting horizontal movement (MOVE_LEFT or MOVE_RIGHT),
+  MovementState is set to RUN, and the run animation is shown (even in air).
+- Otherwise, MovementState is set to JUMP, and the jump animation is shown.
+
+This matches the gameplay choice that “airborne movement” still looks like motion,
+while a neutral airborne state uses the dedicated jump sequence.
+
+------------------------------------------------
+1.8.4 Flicker prevention and smooth transitions
+------------------------------------------------
+
+The anti-flicker energy threshold for starting a run (Section 1.4.1)
+also stabilizes the animation system.
+
+Because starting to run requires MIN_ENERGY_TO_START_RUNNING,
+the avatar avoids rapid oscillation between IDLE and RUN when energy is very low.
+This directly reduces visual animation flicker and keeps movement feedback readable.
+
+------------------------------------------------
+1.8.5 Extensibility
+------------------------------------------------
+
+The animation logic is centralized in the MovementState  -> Renderable mapping.
+
+To add future animations, the code structure supports:
+- Adding a new MovementState enum value.
+- Adding a matching AnimationRenderable.
+- Extending updateAvatarAnimationByState with a new mapping case.
+
+This keeps the logic maintainable and avoids scattering animation switching
+across unrelated code paths.
+
+
+================================================
+2. Trees package implementation
+================================================
+
+2.1 Overview of responsibilities
+--------------------------------
+
+pepse.world.trees.Flora
+
+Flora is the global planner of vegetation.
+It decides:
+- Where trees exist.
+- Enforces spacing and placement constraints.
+- Determines neighboring trees.
+- Passes spatial constraints to individual Tree instances.
+
+pepse.world.trees.Tree
+
+Tree represents a single tree and is responsible for:
+- Building the trunk.
+- Planning the top tree grid.
+- Creating leaves and fruits according to placement rules.
+
+pepse.world.trees.Leaf
+
+Leaf is responsible only for leaf behavior:
+- Visual appearance.
+- Wind-like animation.
+
+pepse.world.trees.Fruit
+
+Fruit is responsible for:
+- Being collected by the avatar.
+- Becoming temporarily unavailable when collected.
+- Reappearing after a delay.
+
+------------------------------------------------
+2.1.1 Class relationships inside the trees package
+------------------------------------------------
+
+Dependencies are strictly one directional:
+
+Flora ->  Tree ->  (Leaf, Fruit)
+
+Flora performs world level planning and never manages runtime behavior.
+Tree performs structure level planning for a single tree.
+Leaf and Fruit encapsulate their own runtime behavior.
+
+This avoids circular dependencies and prevents any class from becoming
+the class that does everything
+
+------------------------------------------------
+2.1.2 Flora implementation goals – gameplay-driven constraints
+------------------------------------------------
+
+The Flora implementation was explicitly designed to support a playable,
+readable, and challenging game experience.
+
+Flora is random by design with constraints i addded for clarity and challanging
+game, the way of design i did that works in a way that those constraints
+can be easily removed or changed to get fully randomised flora without
+constraints at all if needed.
+
+While randomness is essential for producing a natural and varied world,
+unconstrained randomness can easily produce edge cases that harm gameplay.
+
+The constraints introduced in Flora serve the following purposes:
+- Ensuring a playable spawn area.
+- Preventing trees from clustering too tightly.
+- Avoiding excessive concentration of fruits.
+- Preserving visual clarity and navigation readability.
+
+Randomness is not removed or weakened by these constraints.
+Instead, constraints filter out rare random outcomes that would harm gameplay,
+while preserving a wide and rich random design space.
+
+------------------------------------------------
+2.1.3 Segment-based deterministic randomness in Flora
+------------------------------------------------
+
+Flora divides the world into fixed planning segments (regions).
+Each region:
+- Has a fixed width measured in blocks.
+- Is associated with a deterministic random generator derived from:
+  (world seed, region index).
+
+For each region:
+- A probability check decides whether a tree exists in that region.
+- If a tree is to be placed, a trunk column is selected randomly inside the region,
+  subject to spacing and safety constraints.
+
+This design ensures:
+- Deterministic generation in terms of :  same seed -> same world.
+- Stable streaming in way of : loading/unloading regions in any order gives the same result.
+- Natural but controlled distribution of trees.
+
+------------------------------------------------
+2.1.4 Preventing a trunk at the avatar spawn position
+------------------------------------------------
+
+Because generation is fully deterministic, some seeds naturally lead to a trunk
+being placed exactly at the avatar’s spawn column.
+
+This would immediately block movement and break the game.
+
+To prevent this:
+- The avatar spawn X position is defined once in PepseGameConstants.
+- Flora receives this value and converts it to a column index.
+- Any candidate trunk column equal to the avatar spawn column is rejected.
+
+This guarantees that every seed produces a playable starting state,
+while keeping the rest of the world fully random.
+
+------------------------------------------------
+2.2 Dynamic top tree sizing and neighbor constraints
+------------------------------------------------
+
+Top tree sizes are restricted based on distances to neighboring trunks.
+
+This prevents:
+- Overlapping top trees.
+- Excessive fruit clustering.
+- Ambiguous collection behavior.
+
+Top tree half widths are computed independently for the left and right sides,
+which allows asymmetric but valid shapes, so the random doesnt hardly impected.
+
+The main motivation was a gameplay clarity for example if a fruit is spawned
+ in full randomized situation
+inside a trunk then the avatar will not be able to collect the fruit.
+another example is if two trees are really close and the top trees of both
+ intersect so some fruits may
+appear on each other, or really close to each other, so the avatar
+ will be able to collect
+some number of fruit in a single hit, which might be confusing to get energy
+ from 10 for example to 80 because there are
+7 fruits on top of each other or really close.
+so i added the constarints so the game will be more challanging and clear, for the player.
+
+------------------------------------------------
+2.3 Top tree matrix design and placement rules:
+------------------------------------------------
+The matrix is built squered but is not squered by logic, because 
+different size of the top tree might be in different sizes accoridng
+to the constarints i made that will be explained.
+The top tree is represented as a 2D matrix with enum states:
+- EMPTY
+- ILLEGAL
+- LEAF
+- FRUIT
+
+Illegal cells include:
+- Cells outside allowed horizontal bounds.
+- Cells intersecting terrain.
+- The trunk column : for fruit placement.
+
+Placement order:
+1. Mark ILLEGAL cells.
+2. Place leaves in EMPTY cells.
+3. Place fruits only in EMPTY cells that are structurally supported by leaves.
+
+------------------------------------------------
+2.3.2 Top tree matrix as a rule based structure:
+------------------------------------------------
+
+The top tree is modeled as a 2D matrix whose purpose is not only spatial
+representation, but rule enforcement.
+
+Rather than placing leaves and fruits directly in the world using conditions,
+the matrix acts as an intermediate logical model that represents which placements
+are legal, illegal, or already occupied.
+
+Each cell in the matrix represents a potential position relative to the trunk,
+and is labeled using an enum value (EMPTY, ILLEGAL, LEAF, FRUIT).
+
+This design was chosen intentionally for several reasons:
+
+First, the matrix provides a clear and centralized representation of the placement rules.
+Instead of scattering conditional logic across multiple checks and random attempts,
+all legality constraints are encoded explicitly in the matrix state.
+
+This makes the logic:
+- Easier to reason about.
+- Easier to debug.
+- Easier to validate against the assignment requirements.
+
+Second, the matrix enforces a strict placement pipeline:
+1. Determine which cells are structurally illegal (terrain intersection, trunk column,
+   neighbor tree overlap, out-of-bounds).
+2. Randomly place leaves only in EMPTY cells.
+3. Place fruits only in cells that satisfy the “between leaves” rules.
+
+At no point is a fruit placed arbitrarily.
+Every fruit placement is validated against the matrix state, which guarantees
+that fruits are always structurally connected to the top tree.
+
+Third, the matrix design makes the “rule set” explicit and configurable.
+
+Because legality is encoded by marking cells as ILLEGAL, the system can easily be tuned:
+- If the requirement was full randomness, it would be enough to remove (or weaken)
+  some of the ILLEGAL marking rules, and then the algorithm would naturally allow:
+  - leaf overlap with terrain,
+  - fruit clusters,
+  - and top tree shapes that can intersect the ground or neighboring trees.
+
+In other words, the matrix is not a hard coded top tree shape generator.
+It is a rule engine: by changing the rules that produce ILLEGAL cells, we change
+the entire top tree “legal world” without rewriting the placement algorithm itself.
+
+This connects directly to the design philosophy described earlier in this README:
+constraints are not meant to remove randomness, but to prevent rare random outcomes
+that harm gameplay clarity and navigation readability.
+
+The chosen constraints intentionally favor:
+- A clearer and more defined top tree silhouette.
+- Reduced visual noise from ground overlapping leaves.
+- More readable fruit placement (collectibles are easier to locate and understand).
+- Less ambiguous interactions between neighboring trees.
+
+Fourth, this design follows the Open/Closed Principle.
+
+The Tree class is:
+- Closed for modification: the placement pipeline does not need to change.
+- Open for extension: new top tree elements can be added by extending the enum and
+  adding an additional placement phase that operates on the matrix.
+
+For example, future top tree features could include:
+- FLOWER
+- NEST
+- BIRD
+- SNOW
+- DECORATION
+
+Each such feature could be added by:
+- Extending the enum.
+- Adding new rule marking and/or a new placement pass.
+
+No existing placement logic would need to be rewritten.
+
+Finally, the matrix cleanly separates responsibilities:
+- Flora decides global spatial constraints and passes them to the Tree.
+- Tree plans legality and structure using the matrix.
+- Leaf and Fruit focus only on runtime behavior.
+
+Tree never needs to ask:
+“Is this position allowed?”
+It already knows the answer from the matrix.
+
+In summary, the top tree matrix is not an implementation detail,
+but a deliberate architectural decision that encodes rules,
+supports extensibility, and improves long-term maintainability.
+
+------------------------------------------------
+2.3.1 Fruit placement rule (“between leaves”)
+------------------------------------------------
+
+A fruit cell is legal if at least one of the following holds:
+- A leaf exists directly below.
+- Leaves exist on both left and right.
+- A leaf exists above and on one side (left or right).
+
+This ensures fruits are visually and structurally part of the top tree,
+rather than floating arbitrarily.
+
+The top tree matrix easily lets changing the rules or deciding where 
+fruits might be spawned according to leaves
+placement.
+
+------------------------------------------------
+2.4 Leaf design
+------------------------------------------------
+
+Leaf behavior (color and wind animation) is encapsulated entirely in the Leaf class.
+Tree only decides placement, not behavior.
+
+ADDITION – Leaf detailed implementation:
+Each leaf is created using Leaf.create(topLeftCorner, seed).
+The leaf-specific randomness is deterministic and derived from:
+Objects.hash(seed, (int) topLeftCorner.x(), (int) topLeftCorner.y()).
+This means:
+- the exact same leaf cell always produces the same motion parameters,
+  even if the world is unloaded and reloaded.
+- different leaf cells do not share the same random sequence, preventing "synchronized" motion.
+
+The Leaf class creates a GameObject of block size (Block.SIZE) and attaches:
+1) A ScheduledTask with a random delay in [0, MAX_LEAF_MOVEMENT_DELAY].
+   This prevents all leaves in a tree from starting to animate simultaneously.
+2) Two back-and-forth transitions that simulate wind:
+   - Rotation transition on renderer().setRenderableAngle
+     with an angle sampled in [MIN_LEAF_WIND_MOVING_ANGLE, MAX_LEAF_WIND_MOVING_ANGLE].
+   - Scaling transition using leaf::setDimensions between:
+     leafMinSize (shrink) and leafMaxSize (grow),
+     sampled using factors in [MIN_LEAF_SHRINK_FACTOR, 1] and [1, MAX_LEAF_GROW_FACTOR].
+
+The important design idea is separation:
+- Tree is responsible for structure and legality.
+- Leaf is responsible for runtime animation and "alive" feeling.
+
+This makes the system easy to extend:
+If more leaf behaviors are needed (sound, particle, interaction),
+they can be added inside Leaf without changing Tree or Flora.
+
+------------------------------------------------
+2.5 Fruit disappearance and reappearance
+------------------------------------------------
+
+When collected:
+- The fruit becomes invisible.
+- The fruit becomes non collidable.
+- A scheduled task is created to respawn it.
+
+When respawned:
+- Visibility is restored.
+- Collisions with the avatar are enabled again.
+
+Fruit has its own layer and collision rules.
+In the GameManager it was decided that the fruit layer and the avatar layer
+suppossed to collide. which means because of the game engine rules that
+only avatar and fruit supposed to collide because different layers are not
+supposed to collide unless decided other wise.
+so fruits collides only with the avatar, and only while available.
+because of the override of the shouldcollide with method.
+so the gamemanger decideds that those layers suppose to collide,
+but each object independently decides what should happen in collission.
+so in that way when fruit becomes non collidable it means cause of the layer 
+logic from the game engine cause it was decided only avtar layer migt collide 
+fruit layer that the fruit becomes non collidable to any object.
+this decision was made by the gamemanager because he is the authority for that.
+if tomorrow we want that for example there will be birds in the game and the birds
+can eat fruits so we only need to make the birds layer and the fruit layer collidable 
+and then birds can decide what happenss in that situation in terms of birds world. 
+maybe more energy or maybe not flying no more.
+and the fruit decides either it disappeares or not, since its a bird and birds eat in small amount
+so maybe in case of birds collision the fruit doesnt need to disappeare.
+so in summary the this disappearance of the fruit is easy to extend and well encapsulate in
+terms of fruit agains gamemanager decisions which are more in the macro terms.
+
+So in that way we get that :
+Energy updates are handled by the Avatar, not by Fruit,
+preserving encapsulation and avoiding circular dependencies.
+which means avatar only decides when i collide fruit what should happen
+in terms of enery.
+And the fruit decides what should happen in terms of my existing.
+
+------------------------------------------------
+ADDITION – Tree detailed implementation and randomness (height / top tree / leaves / fruits)
+------------------------------------------------
+
+The Tree class is responsible for building a single tree in a reproducible but varied way.
+
+1) Trunk height randomness:
+Trunk height is selected by:
+generateRandomTrunkHeightInBlocks(randomGenerator)
+with values in:
+[MIN_TRUNK_HEIGHT_IN_BLOCKS, MAX_TRUNK_HEIGHT_IN_BLOCKS].
+
+This randomGenerator is derived from:
+new Random(makeFloraSeed(seed, trunkColumn))
+inside Flora.
+Therefore:
+- Each trunk column always produces the same trunk height (deterministic).
+- Different trunks get different heights because trunkColumn differs.
+
+2) Trunk block construction:
+The trunk is built as a vertical stack of Block objects:
+- bottom aligned just above the terrain top at the trunk x.
+- each block placed one Block.SIZE above the previous.
+
+Trunk colors are sampled deterministically:
+Random trunkRandom = new Random(Objects.hash(seed, trunkColumnWorldX))
+and then approximateColor(BASE_TRUNK_COLOR, trunkRandom).
+This produces a consistent "wood texture variation" per trunk.
+
+3) Top tree size randomness:
+The top tree grid size is controlled by the chosen half width:
+generateRandomTopTreeHalfWidthInBlocks(randomGenerator, minHalfWidth, maxHalfWidth).
+
+Then:
+topTreeFullWidth = 2 * halfWidth + 1
+and the grid is created as a square matrix of that size.
+but the constarints on each side of the top tree matrix might cause 
+the matrix become non squre in terms of legal places. which means
+the matrix in theory is squared so it will be easy to maintain and change
+but in reality it doesnt have to be squared because of the randomness and constraints
+which gives more natural looks to top trees in the game.
+
+4) Neighbor constraints integration:
+Although the top tree size is randomized, the allowed half widths to left and right
+are restricted based on neighbor trunks:
+allowedTopTreeHalfWidthLeftInBlocks
+allowedTopTreeHalfWidthRightInBlocks
+
+This affects legality marking inside the grid:
+cells outside the allowed range become ILLEGAL.
+So the top tree remains random but "clipped" by neighbor constraints in a rule-based way.
+
+5) Random leaf count and placement:
+Leaf count is randomized by:
+generateRandomLeafCount(randomGenerator, gridSize)
+bounded by MIN_LEAF_COUNT and MAX_LEAF_COUNT (and capped by grid capacity).
+
+Leaves are placed by random sampling of (row, col) cells:
+- only EMPTY cells can become LEAF.
+- attempts are limited by MAX_RANDOM_PLACEMENT_ATTEMPTS_MULTIPLIER to avoid infinite loops.
+
+6) Random fruit count and placement:
+Fruit count is randomized similarly, then fruits are placed only in:
+- EMPTY cells
+- cells that satisfy isLegalFruitCell (the “between leaves” rule)
+- never in the trunk column (explicit check).
+
+Each fruit’s visual randomness is deterministic:
+ColorSupplier.approximateColor(BASE_FRUIT_COLOR, new
+ Random(Objects.hash(seed, x, y, FRUIT_TAG))).
+
+Summary:
+Tree randomness is "two-level":
+- Structure randomness (height, top tree width, leaf/fruit counts) 
+comes from a deterministic Random
+  derived from the world seed and trunk column.
+- Local visual/animation randomness (leaf wind, fruit/trunk colors) 
+is derived from position-based seeds.
+This ensures variety without breaking reproducibility.
+
+================================================
+3. Additional classes beyond questions 1–2
+================================================
+
+Beyond the mandatory requirements of questions 1–2, i introduced several
+additional infrastructure classes whose sole purpose is to improve coordination
+between game systems, enforce consistency, and maintain encapsulation.
+
+These classes do not add gameplay mechanics.
+Instead, they act as shared reference points that allow different systems
+(avatar, world, flora, terrain, day/night cycle, Display) to communicate indirectly
+without creating tight coupling.
+
+------------------------------------------------
+3.1 WorldConstants – world-wide spatial coordination
+------------------------------------------------
+
+WorldConstants provides shared constants and utility methods related to world
+geometry and coordinate calculations.
+
+Its main responsibilities are:
+- Defining how the world relates to the window size for example : base ground height.
+- Providing canonical conversions between continuous world coordinates
+  and the discrete block grid.
+- Ensuring all classes use the same logic for block alignment.
+
+Examples of responsibilities:
+- Computing the base ground height at x=0 based on window height.
+- Aligning X/Y coordinates to multiples of Block.SIZE.
+- Flooring Y coordinates consistently when interacting with terrain.
+
+This class is used by:
+- Terrain (to align ground blocks).
+- Flora and Tree (to detect ground overlap and plan tree geometry).
+- PepseGameManager (to convert camera position to region indices).
+
+Why this class exists:
+Without WorldConstants, each system would have to re-implement its own
+rounding and alignment logic, which would easily lead to subtle inconsistencies
+(for example : leaves intersecting terrain, trees floating or sinking, mismatched regions).
+
+By centralizing these calculations:
+- All systems agree on what “aligned to the grid” means.
+- Changes to world scale or block size affect the entire world consistently.
+- Encapsulation is preserved, because no class needs to inspect another class’s internals.
+
+------------------------------------------------
+3.2 WorldTags – semantic identification without type checks
+------------------------------------------------
+
+WorldTags centralizes all string tags used to identify game objects.
+different tags of different game objects.
+These tags are used extensively for:
+- Collision filtering.
+- Gameplay logic decisions.
+- Runtime behavior checks.
+- Used while debugging
+
+Tags include:
+- TERRAIN_TAG
+- TRUNK_TAG
+- LEAF_TAG
+- FRUIT_TAG
+- AVATAR_TAG
+- SKY_TAG
+- SUN_TAG
+- SUN_HALO_TAG
+- NIGHT_TAG
+
+This class is used by:
+- Avatar (to distinguish terrain, trunks, and fruits during collisions).
+- Fruit (to restrict collisions to the avatar).
+- Day/night objects (sun, halo, night overlay).
+- PepseGameManager (implicitly, via collision layer rules).
+
+Main goal was to not destroy polymorphism.
+I used tags as a part of the game engine instead of instanceof checks as we studied to avoid
+so i needed to find a way sync between the different objects in the game so atlest they could
+know what is the name of the thing i just collide in? 
+in that way the it preserves polymorphism, while using game engine functionalities.
+
+Why a centralized tag class:
+- Preserving polymorphism
+- Avoids duplicated string literals across the codebase.
+- Creates a single source of truth for semantic object roles.
+
+This design allows the engine’s collision system to be used idiomatically,
+while keeping gameplay logic clean and decoupled.
+
+------------------------------------------------
+3.3 PepseGameConstants – global configuration and orchestration
+------------------------------------------------
+
+PepseGameConstants defines global configuration values that describe how the game
+is assembled rather than how individual objects behave.
+
+Its responsibilities include:
+- Layer indices for all game object categories.
+- Frame rate configuration.
+- Day/night cycle length.
+- Default avatar spawn location.
+
+This class is primarily used by:
+- PepseGameManager (world construction, layer configuration, camera setup).
+- Flora (to avoid placing a trunk at the avatar spawn position).
+- Display setup (energy display layer).
+
+Examples of values centralized here:
+- Layer ordering for sky, terrain, avatar, leaves, fruits, dispaly, sun, night overlay.
+- Collision rules that depend on consistent layer assignment.
+- Default avatar spawn X coordinate used consistently across systems.
+
+Why this class exists:
+Without PepseGameConstants, these values would either:
+- Be duplicated across multiple classes, or
+- Be hard-coded inside logic-heavy classes like PepseGameManager.
+
+Both options would harm maintainability and clarity.
+
+By extracting these values:
+- The game manager becomes declarative rather than cluttered with magic numbers.
+- Global changes for example:  layer ordering or cycle length, are easy and safe.
+- Gameplay logic classes remain focused on behavior, not configuration.
+
+------------------------------------------------
+3.4 Design rationale – coordination without breaking encapsulation
+------------------------------------------------
+
+All three classes (WorldConstants, WorldTags, PepseGameConstants) share a common goal:
+
+To allow independent systems to coordinate through shared agreements,
+rather than through direct knowledge of each other.
+
+They:
+- Do not hold mutable state.
+- Do not depend on gameplay classes.
+- Do not contain logic that belongs to a specific entity.
+
+Instead, they define:
+- Common vocabulary (tags).
+- Common geometry rules (world constants).
+- Common configuration (game constants).
+
+This approach preserves encapsulation while still allowing:
+- Deterministic world generation.
+- Stable infinite-world streaming.
+- Clear separation between gameplay, world planning, and rendering concerns.
+
+================================================
+4. API changes and notable additions
+================================================
+
+4.1 ColorSupplier overloads for deterministic randomness
+------------------------------------------------
+
+To support deterministic randomness in an infinite, streamed world,
+i extended the provided ColorSupplier class without changing its original behavior.
+
+The original class relies on an internal static Random instance, which is unsuitable
+for reproducible world generation when objects are created, destroyed, and recreated.
+
+To address this, i added overloads that accept a caller-provided Random instance:
+- public static Color approximateColor(Color baseColor, Random rnd)
+- public static Color approximateColor(Color baseColor, int colorDelta, Random rnd)
+- private static int randomChannelInRange(int min, int max, Random rnd)
+
+These overloads reuse the original logic exactly:
+- Same channel ranges.
+- Same clamping to [0,255].
+- Same color distribution.
+
+The only difference is the randomness source.
+
+This design allows:
+- Deterministic color sampling per object and position.
+- Stable visual appearance across world reloads.
+- Full backward compatibility with existing code.
+
+Similar to the way i handled the avatar energy flicker (Section 1.4.1),
+the decision to modify ColorSupplier was made based on the official course Q&A forum.
+
+During development, i needed deterministic randomness for world generation
+(colors must be reproducible even when objects are unloaded and loaded again).
+However, the provided ColorSupplier implementation uses an internal static Random,
+which makes the produced colors dependent on creation order and runtime timing.
+
+In the course Q&A forum, it was explicitly answered that one of the acceptable
+solutions is to modify the provided ColorSupplier class, as long as
+the change is documented in the README.
+
+Therefore, i implemented the change as pure method overloading:
+- The existing API behavior remains unchanged for all existing callers.
+- New overloads allow callers to pass a Random instance explicitly.
+
+This approach provides deterministic color sampling without introducing coupling
+between unrelated systems, and without changing the distribution logic.
+
+------------------------------------------------
+End of README
+------------------------------------------------
